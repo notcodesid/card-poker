@@ -101,6 +101,9 @@ export function TableView({
             <>
               <p>Share this link with your opponent:</p>
               <code className="share">{window.location.href}</code>
+              <button className="btn ghost" disabled={t.busy} onClick={() => t.cancel().then((ok) => ok && onLeave())}>
+                Cancel table and reclaim my stake
+              </button>
             </>
           ) : (
             <button className="btn primary" onClick={onJoin}>Join this table with one of my cards</button>

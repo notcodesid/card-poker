@@ -40,15 +40,17 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
 
   const run = useCallback(
     async (label: string, layer: LogEntry["layer"], fn: () => Promise<string | void>) => {
-      if (busyRef.current) return;
+      if (busyRef.current) return false;
       busyRef.current = true;
       setBusy(true);
       const start = performance.now();
       try {
         const sig = await fn();
         push({ at: Date.now(), label, layer, ms: Math.round(performance.now() - start), sig: sig || undefined });
+        return true;
       } catch (e) {
         push({ at: Date.now(), label, layer, error: (e as Error).message.slice(0, 160) });
+        return false;
       } finally {
         busyRef.current = false;
         setBusy(false);
@@ -141,7 +143,10 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
   const claimTimeout = () =>
     table && run("Claim timeout (opponent folds)", "ER", () => client.claimTimeout(table)).then(poll);
 
-  return { table, delegated, hand, seat, botSeat, log, busy, opponentHidden, act, claimTimeout, run, poll };
+  const cancel = async () =>
+    !!table && (await run("Cancel table (card + USDC refunded)", "Base", () => client.cancelTable(table)));
+
+  return { table, delegated, hand, seat, botSeat, log, busy, opponentHidden, act, claimTimeout, cancel, run, poll };
 }
 
 function toCall(t: TableAccount, seat: number) {
