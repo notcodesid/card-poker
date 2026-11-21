@@ -104,12 +104,14 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
 
     const dealer = table.dealer;
     if (phase === "ready" && delegated) {
-      const starter = dealer === seat ? client : dealer === botSeat ? bot : null;
-      if (!starter) return;
+      // Any seated player may deal; the non-dealer waits longer so an absent dealer can't stall the match.
+      const starter = dealer === botSeat && bot ? bot : client;
+      const delay = dealer === seat || dealer === botSeat ? (table.handNo === 0 ? 300 : 2500) : 15000;
       autoRef.current = key;
       (async () => {
-        await sleep(table.handNo === 0 ? 300 : 2500);
-        await run(`Deal hand #${table.handNo + 1} (shuffle in TEE)`, "ER", () => starter.startHand(table));
+        await sleep(delay);
+        const ok = await run(`Deal hand #${table.handNo + 1} (shuffle in TEE)`, "ER", () => starter.startHand(table));
+        if (!ok && autoRef.current === key) autoRef.current = "";
       })();
       return;
     }
