@@ -51,7 +51,7 @@ export default function App() {
     }
   }, [wallet]);
 
-  const allowanceUnits = (usd: number) => new BN(Math.round(usd * 10 ** USDC_DECIMALS));
+  const allowanceUnits = (usd: number) => new BN(Math.max(0, Math.round(usd * 10 ** USDC_DECIMALS)));
 
   const create = async (card: CardInfo, allowance: number) => {
     const id = randomTableId();

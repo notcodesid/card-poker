@@ -150,7 +150,7 @@ export function Lobby({
                 className="raise-input"
                 value={allowance}
                 min={0}
-                onChange={(e) => setAllowance(Number(e.target.value))}
+                onChange={(e) => setAllowance(Math.max(0, Number(e.target.value) || 0))}
               />
             </label>
             <div className="row">
