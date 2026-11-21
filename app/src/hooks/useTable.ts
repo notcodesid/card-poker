@@ -38,8 +38,11 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
   const latestRef = useRef<TableAccount | null>(null);
   latestRef.current = table;
   const aliveRef = useRef(true);
-  useEffect(() => () => {
-    aliveRef.current = false;
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
   }, []);
 
   const push = (e: LogEntry) => setLog((l) => [e, ...l].slice(0, 40));
