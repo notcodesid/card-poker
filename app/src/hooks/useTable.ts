@@ -146,7 +146,7 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
     table && run("Claim timeout (opponent folds)", "ER", () => client.claimTimeout(table)).then(poll);
 
   const cancel = async () =>
-    !!table && (await run("Cancel table (card + USDC refunded)", "Base", () => client.cancelTable(table)));
+    !!table && (await run("Cancel table (card + USDC refunded)", "Solana", () => client.cancelTable(table)));
 
   return { table, delegated, hand, seat, botSeat, log, busy, opponentHidden, act, claimTimeout, cancel, run, poll };
 }
