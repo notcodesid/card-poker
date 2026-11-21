@@ -35,6 +35,12 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
   const [opponentHidden, setOpponentHidden] = useState<boolean | null>(null);
   const busyRef = useRef(false);
   const autoRef = useRef("");
+  const latestRef = useRef<TableAccount | null>(null);
+  latestRef.current = table;
+  const aliveRef = useRef(true);
+  useEffect(() => () => {
+    aliveRef.current = false;
+  }, []);
 
   const push = (e: LogEntry) => setLog((l) => [e, ...l].slice(0, 40));
 
@@ -110,6 +116,11 @@ export function useTable(client: PokerClient, tableId: BN | null, bot: PokerClie
       autoRef.current = key;
       (async () => {
         await sleep(delay);
+        const now = latestRef.current;
+        if (!aliveRef.current || !now || now.handNo !== table.handNo || phaseOf(now) !== "ready") {
+          if (autoRef.current === key) autoRef.current = "";
+          return;
+        }
         const ok = await run(`Deal hand #${table.handNo + 1} (shuffle in TEE)`, "ER", () => starter.startHand(table));
         if (!ok && autoRef.current === key) autoRef.current = "";
       })();
