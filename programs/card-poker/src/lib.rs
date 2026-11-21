@@ -210,7 +210,6 @@ pub mod card_poker {
         table.paid = true;
         let id = table.table_id.to_le_bytes();
         let seeds: &[&[&[u8]]] = &[&[VAULT_SEED, &id, &[ctx.bumps.vault]]];
-        let allowance = table.top_ups[0];
         table.top_ups[0] = 0;
         let a = &ctx.accounts;
         token_transfer(
@@ -218,7 +217,7 @@ pub mod card_poker {
             &a.vault_card,
             &a.player_card,
             &a.vault,
-            1,
+            a.vault_card.amount,
             Some(seeds),
         )?;
         token_transfer(
@@ -226,9 +225,12 @@ pub mod card_poker {
             &a.vault_usdc,
             &a.player_usdc,
             &a.vault,
-            allowance,
+            a.vault_usdc.amount,
             Some(seeds),
         )?;
+        let rent_to = a.player1.to_account_info();
+        close_vault_token_account(&a.token_program, &a.vault_card, &rent_to, &a.vault, seeds)?;
+        close_vault_token_account(&a.token_program, &a.vault_usdc, &rent_to, &a.vault, seeds)?;
         pay_from_vault(
             &a.vault,
             &a.player1.to_account_info(),
@@ -402,14 +404,13 @@ pub mod card_poker {
         let amount = table.stake.checked_mul(2).ok_or(PokerError::MathOverflow)?;
         let id = table.table_id.to_le_bytes();
         let seeds: &[&[&[u8]]] = &[&[VAULT_SEED, &id, &[ctx.bumps.vault]]];
-        let usdc = table.top_ups[0] + table.top_ups[1];
         let a = &ctx.accounts;
         token_transfer(
             &a.token_program,
             &a.vault_card1,
             &a.winner_card1,
             &a.vault,
-            1,
+            a.vault_card1.amount,
             Some(seeds),
         )?;
         token_transfer(
@@ -417,7 +418,7 @@ pub mod card_poker {
             &a.vault_card2,
             &a.winner_card2,
             &a.vault,
-            1,
+            a.vault_card2.amount,
             Some(seeds),
         )?;
         token_transfer(
@@ -425,9 +426,13 @@ pub mod card_poker {
             &a.vault_usdc,
             &a.winner_usdc,
             &a.vault,
-            usdc,
+            a.vault_usdc.amount,
             Some(seeds),
         )?;
+        let rent_to = a.winner.to_account_info();
+        for account in [&a.vault_card1, &a.vault_card2, &a.vault_usdc] {
+            close_vault_token_account(&a.token_program, account, &rent_to, &a.vault, seeds)?;
+        }
         pay_from_vault(
             &a.vault,
             &a.winner.to_account_info(),
@@ -676,6 +681,27 @@ fn token_transfer<'info>(
             None => ctx,
         },
         amount,
+    )
+}
+
+/// Closes an emptied vault-owned token account, returning its rent to `destination`.
+fn close_vault_token_account<'info>(
+    token_program: &Program<'info, Token>,
+    account: &Account<'info, TokenAccount>,
+    destination: &AccountInfo<'info>,
+    vault: &SystemAccount<'info>,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    token::close_account(
+        CpiContext::new(
+            token_program.key(),
+            token::CloseAccount {
+                account: account.to_account_info(),
+                destination: destination.clone(),
+                authority: vault.to_account_info(),
+            },
+        )
+        .with_signer(signer_seeds),
     )
 }
 

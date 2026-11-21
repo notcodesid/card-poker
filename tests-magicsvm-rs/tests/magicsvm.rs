@@ -570,7 +570,13 @@ fn settle_and_claim(m: &mut Match) {
     // The loser triggers the payout so the winner's balance delta excludes fees.
     m.send(BASE, 1 - t.match_winner as usize, vec![claim], "claim pot");
     let after = m.svm.get_balance(&as_address(winner)).unwrap();
-    assert_eq!(after - before, 2 * STAKE, "winner receives both stakes");
+    // Both stakes plus the rent of the three closed vault token accounts.
+    const TOKEN_ACCOUNT_RENT: u64 = 2_039_280;
+    assert_eq!(
+        after - before,
+        2 * STAKE + 3 * TOKEN_ACCOUNT_RENT,
+        "winner receives both stakes"
+    );
     assert_eq!(m.svm.get_balance(&as_address(m.vault)).unwrap_or(0), 0);
     let (usdc, cards) = (m.tok.usdc, m.tok.cards);
     assert_eq!(
@@ -590,6 +596,13 @@ fn settle_and_claim(m: &mut Match) {
         "winner gets the top-up"
     );
     assert_eq!(m.token_balance(&ata(&m.vault, &usdc)), 0);
+    for mint in [usdc, cards[0], cards[1]] {
+        let vault_ata = as_address(ata(&m.vault, &mint));
+        assert!(
+            m.svm.get_account_for(BASE, &vault_ata).is_none(),
+            "vault token accounts closed"
+        );
+    }
 
     // Instant sell-back of the more valuable card.
     let config = m.tok.config;
