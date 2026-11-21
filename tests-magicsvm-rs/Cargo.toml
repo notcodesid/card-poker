@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "card-poker-magicsvm-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+anchor-lang = "=1.0.2"
+card-poker = { path = "../programs/card-poker", features = ["no-entrypoint"] }
+ephemeral-rollups-sdk = { version = "0.16.2", features = ["anchor", "access-control"] }
+magicsvm = "0.3.0"
+test-utils = { path = "../test-utils/rust", features = ["anchor"] }
+solana-instruction = { version = "~3.4.0", features = ["bincode"] }
+solana-keypair = "3.1.2"
+solana-native-token = "3.0.0"
+solana-signer = "3.0.1"
