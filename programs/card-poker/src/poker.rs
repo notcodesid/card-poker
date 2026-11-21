@@ -24,29 +24,20 @@ pub fn suit(card: u8) -> u8 {
     card / 13
 }
 
-/// Fisher-Yates shuffle driven by splitmix64 seeded from a 32-byte seed.
+/// Fisher-Yates shuffle where swap `i` uses `sha256(seed || i)`, so the full
+/// 256-bit seed drives every swap.
 pub fn shuffle(seed: [u8; 32]) -> [u8; DECK_SIZE] {
     let mut deck = [0u8; DECK_SIZE];
     for (i, card) in deck.iter_mut().enumerate() {
         *card = i as u8;
     }
-    let mut state = seed.chunks(8).fold(0u64, |mut acc, c| {
-        acc ^= u64::from_le_bytes(c.try_into().unwrap());
-        splitmix64(&mut acc)
-    });
     for i in (1..DECK_SIZE).rev() {
-        let j = (splitmix64(&mut state) % (i as u64 + 1)) as usize;
+        let digest = solana_sha256_hasher::hashv(&[&seed, &[i as u8]]).to_bytes();
+        let r = u64::from_le_bytes(digest[..8].try_into().unwrap());
+        let j = (r % (i as u64 + 1)) as usize;
         deck.swap(i, j);
     }
     deck
-}
-
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
 }
 
 /// Score of the best 5-card hand out of 7 cards. Higher is better; equal scores tie.

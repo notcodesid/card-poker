@@ -9,7 +9,7 @@ use {
         TABLE_SEED, VAULT_SEED,
     },
     ephemeral_rollups_sdk::{
-        access_control::structs::{EphemeralPermission, Member, AUTHORITY_FLAG, TX_LOGS_FLAG},
+        access_control::structs::EphemeralPermission,
         anchor::{DelegationProgram, MagicProgram},
         consts::{EPHEMERAL_VAULT_ID, MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID, PERMISSION_PROGRAM_ID},
         pda::{
@@ -46,13 +46,6 @@ fn pda(seeds: &[&[u8]]) -> Pubkey {
     Pubkey::find_program_address(seeds, &card_poker::ID).0
 }
 
-fn member(pubkey: Pubkey) -> Member {
-    Member {
-        flags: AUTHORITY_FLAG | TX_LOGS_FLAG,
-        pubkey,
-    }
-}
-
 struct Match {
     svm: MagicSVM,
     p1: Keypair,
@@ -78,10 +71,19 @@ impl Match {
     }
 
     fn try_send(&mut self, signer: usize, ixs: Vec<Instruction>) -> bool {
+        self.try_send_to(ER, signer, ixs)
+    }
+
+    fn try_send_to(
+        &mut self,
+        target: TransactionTarget,
+        signer: usize,
+        ixs: Vec<Instruction>,
+    ) -> bool {
         let kp = if signer == 0 { &self.p1 } else { &self.p2 };
-        let tx = test_utils::sign_tx(&[kp], &ixs, self.svm.latest_blockhash_for(ER));
-        let ok = self.svm.send_transaction_to(ER, tx).is_ok();
-        self.svm.expire_blockhash_for(ER);
+        let tx = test_utils::sign_tx(&[kp], &ixs, self.svm.latest_blockhash_for(target));
+        let ok = self.svm.send_transaction_to(target, tx).is_ok();
+        self.svm.expire_blockhash_for(target);
         ok
     }
 
@@ -138,13 +140,9 @@ impl Match {
         addr: Pubkey,
         authority: Pubkey,
         account_type: AccountType,
-        members: Option<Vec<Member>>,
     ) -> Instruction {
         ix(
-            instruction::InitPermission {
-                account_type,
-                members,
-            },
+            instruction::InitPermission { account_type },
             accounts::InitPermission {
                 permissioned_account: addr,
                 permission: EphemeralPermission::find_pda(&addr).0,
@@ -238,6 +236,13 @@ fn setup(id: u64) -> Match {
     ];
     m.send(BASE, 0, ixs, "create table");
 
+    // Nobody can delegate the table before both players are seated.
+    let early = m.delegate_ix(m.table, k2, AccountType::Table { table_id: id });
+    assert!(
+        !m.try_send_to(BASE, 1, vec![early]),
+        "table delegation before join must fail"
+    );
+
     let join = ix(
         instruction::JoinTable { _table_id: id },
         accounts::JoinTable {
@@ -264,8 +269,8 @@ fn setup(id: u64) -> Match {
     assert_eq!(m.svm.get_balance(&as_address(m.vault)).unwrap(), 2 * STAKE);
 
     let ixs = vec![
-        m.permission_ix(m.table, k1, AccountType::Table { table_id: id }, None),
-        m.permission_ix(m.deck, k1, AccountType::Deck { table_id: id }, Some(vec![])),
+        m.permission_ix(m.table, k1, AccountType::Table { table_id: id }),
+        m.permission_ix(m.deck, k1, AccountType::Deck { table_id: id }),
         m.permission_ix(
             m.hand1,
             k1,
@@ -273,7 +278,6 @@ fn setup(id: u64) -> Match {
                 table_id: id,
                 player: k1,
             },
-            Some(vec![member(k1)]),
         ),
         m.permission_ix(
             m.hand2,
@@ -282,7 +286,6 @@ fn setup(id: u64) -> Match {
                 table_id: id,
                 player: k2,
             },
-            Some(vec![member(k2)]),
         ),
     ];
     m.send(ER, 0, ixs, "init permissions");
@@ -326,6 +329,19 @@ fn settle_and_claim(m: &mut Match) {
         .unwrap()
         .owner;
     assert_eq!(base_owner, as_address(card_poker::ID), "table back on base");
+
+    // Settlement must not publish the deck, hole cards or seeds on Solana.
+    let (deck, hand1, hand2) = (m.deck, m.hand1, m.hand2);
+    let deck: Deck = m.read(BASE, None, &deck).expect("deck on base");
+    assert!(
+        deck.cards.iter().all(|&c| c == u8::MAX),
+        "deck wiped before commit"
+    );
+    for hand in [hand1, hand2] {
+        let hand: Hand = m.read(BASE, None, &hand).expect("hand on base");
+        assert!(hand.cards.iter().all(|&c| c == u8::MAX), "hole cards wiped");
+        assert_eq!(hand.seed, [0; 32], "seed wiped");
+    }
 
     let winner = m.key(t.match_winner as usize);
     let before = m.svm.get_balance(&as_address(winner)).unwrap();

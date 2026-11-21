@@ -900,7 +900,6 @@ dependencies = [
  "card-poker",
  "ephemeral-rollups-sdk 0.16.2",
  "magicsvm",
- "solana-address 2.6.1",
  "solana-instruction 3.4.1",
  "solana-keypair",
  "solana-native-token 3.0.0",

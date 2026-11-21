@@ -12,7 +12,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 use ephemeral_rollups_sdk::access_control::instructions::CreateEphemeralPermissionCpi;
 use ephemeral_rollups_sdk::access_control::structs::{
-    EphemeralMembersArgs, EphemeralPermission, Member,
+    EphemeralMembersArgs, EphemeralPermission, Member, AUTHORITY_FLAG, TX_LOGS_FLAG,
 };
 use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
 use ephemeral_rollups_sdk::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID, PERMISSION_PROGRAM_ID};
@@ -47,6 +47,10 @@ pub mod card_poker {
         small_blind: u64,
     ) -> Result<()> {
         require!(small_blind > 0, PokerError::InvalidConfig);
+        require!(
+            stake == 0 || stake >= Rent::get()?.minimum_balance(0),
+            PokerError::StakeBelowRent
+        );
         require!(
             starting_stack >= small_blind.checked_mul(4).ok_or(PokerError::MathOverflow)?,
             PokerError::InvalidConfig
@@ -90,6 +94,7 @@ pub mod card_poker {
         table.match_winner = NO_WINNER;
 
         ctx.accounts.deck.table_id = table_id;
+        ctx.accounts.deck.player1 = player.key();
         ctx.accounts.deck.cards = [NO_CARD; DECK_SIZE];
         init_hand(&mut ctx.accounts.hand, table_id, player.key());
         Ok(())
@@ -263,6 +268,19 @@ pub mod card_poker {
             ctx.accounts.table.phase == Phase::Finished,
             PokerError::MatchNotDecided
         );
+        // Committed data becomes public on Solana: wipe the deck, hole cards and seeds first.
+        // Showdown hands were already copied to the public table.
+        let deck = &mut ctx.accounts.deck;
+        deck.cards = [NO_CARD; DECK_SIZE];
+        deck.next = 0;
+        for hand in [&mut ctx.accounts.hand1, &mut ctx.accounts.hand2] {
+            hand.cards = [NO_CARD; 2];
+            hand.seed = [0; 32];
+            hand.seed_set = false;
+        }
+        ctx.accounts.deck.exit(&crate::ID)?;
+        ctx.accounts.hand1.exit(&crate::ID)?;
+        ctx.accounts.hand2.exit(&crate::ID)?;
         MagicIntentBundleBuilder::new(
             ctx.accounts.payer.to_account_info(),
             ctx.accounts.magic_context.to_account_info(),
@@ -303,7 +321,27 @@ pub mod card_poker {
     }
 
     /// Base layer. Delegates a table PDA to the (TEE) ER validator.
+    /// Only the owning player may delegate their hand or the deck, and the table only
+    /// after both players are seated.
     pub fn delegate_pda(ctx: Context<DelegatePda>, account_type: AccountType) -> Result<()> {
+        let payer = ctx.accounts.payer.key();
+        {
+            let data = ctx.accounts.pda.try_borrow_data()?;
+            match &account_type {
+                AccountType::Table { .. } => {
+                    let table = Table::try_deserialize(&mut &data[..])?;
+                    require!(table.phase != Phase::Waiting, PokerError::WrongPhase);
+                    table.seat_of(&payer)?;
+                }
+                AccountType::Deck { .. } => {
+                    let deck = Deck::try_deserialize(&mut &data[..])?;
+                    require_keys_eq!(deck.player1, payer, PokerError::NotAPlayer);
+                }
+                AccountType::Hand { player, .. } => {
+                    require_keys_eq!(*player, payer, PokerError::NotAPlayer);
+                }
+            }
+        }
         let seed_data = account_type.seeds();
         let seeds_refs: Vec<&[u8]> = seed_data.iter().map(|s| s.as_slice()).collect();
         let validator = ctx.accounts.validator.as_ref().map(|v| v.key());
@@ -320,12 +358,9 @@ pub mod card_poker {
 
     /// Private ER. Creates the access-control permission for a delegated PDA.
     /// The PDA pays its own permission rent (pre-funded on the base layer).
-    /// `members = None` makes the account public; `Some(vec![])` hides it from everyone.
-    pub fn init_permission(
-        ctx: Context<InitPermission>,
-        account_type: AccountType,
-        members: Option<Vec<Member>>,
-    ) -> Result<()> {
+    /// Membership is fixed per account type: table public, deck hidden from everyone,
+    /// hand private to its owner.
+    pub fn init_permission(ctx: Context<InitPermission>, account_type: AccountType) -> Result<()> {
         if ctx.accounts.permission.lamports() > 0 {
             return Ok(());
         }
@@ -341,9 +376,16 @@ pub mod card_poker {
         );
         seeds.push(vec![bump]);
         let seed_refs: Vec<&[u8]> = seeds.iter().map(|s| s.as_slice()).collect();
-        let (is_private, members) = match members {
-            Some(m) => (true, m),
-            None => (false, vec![]),
+        let (is_private, members) = match account_type {
+            AccountType::Table { .. } => (false, vec![]),
+            AccountType::Deck { .. } => (true, vec![]),
+            AccountType::Hand { player, .. } => (
+                true,
+                vec![Member {
+                    flags: AUTHORITY_FLAG | TX_LOGS_FLAG,
+                    pubkey: player,
+                }],
+            ),
         };
         CreateEphemeralPermissionCpi {
             payer: ctx.accounts.permissioned_account.to_account_info(),
@@ -673,7 +715,13 @@ impl Table {
     }
 
     fn street_done(&self) -> bool {
-        let settled = |i: usize| self.acted[i] || self.stacks[i] == 0;
+        // A player has nothing left to decide once they acted, are all-in, or already
+        // cover an all-in opponent (who cannot be raised).
+        let settled = |i: usize| {
+            self.acted[i]
+                || self.stacks[i] == 0
+                || (self.stacks[1 - i] == 0 && self.bets[i] >= self.bets[1 - i])
+        };
         if !(settled(0) && settled(1)) {
             return false;
         }
@@ -717,6 +765,7 @@ impl Table {
 #[derive(InitSpace)]
 pub struct Deck {
     pub table_id: u64,
+    pub player1: Pubkey,
     pub cards: [u8; 52],
     pub next: u8,
 }
@@ -825,6 +874,8 @@ pub enum PokerError {
     WrongWinner,
     #[msg("Account does not match the given account type.")]
     WrongAccount,
+    #[msg("Stake must be 0 or at least the rent-exempt minimum.")]
+    StakeBelowRent,
     #[msg("Arithmetic overflow.")]
     MathOverflow,
 }

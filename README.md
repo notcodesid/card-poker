@@ -17,7 +17,7 @@ Accounts per table:
 - `Deck` — **private, no members**: the shuffled deck. Nobody, including the players, can read it.
 - `Hand` (one per player) — **private to its owner**: hole cards and that player's shuffle seed.
 
-The shuffle seed is `sha256(seed_p1, seed_p2, table_id, hand_no, slot)`. Each seed lives in its
+The shuffle seed is `sha256(seed_p1, seed_p2, table_id, hand_no, slot)`, and each Fisher-Yates swap uses `sha256(seed || i)`. `settle` wipes the deck, hole cards and seeds before committing them to Solana. Each seed lives in its
 owner's private `Hand`, so neither player can predict or bias the deck. Folded hands are never
 revealed; showdown hands are copied to the public `Table`.
 
@@ -29,7 +29,7 @@ has all the chips. That player wins the whole escrow.
 
 1. Base: `create_table` + `delegate_pda(Deck)` + `delegate_pda(Hand p1)` (player 1).
 2. Base: `join_table` + `delegate_pda(Table)` + `delegate_pda(Hand p2)` (player 2).
-3. ER: `init_permission` — Table public, Deck private `[]`, each Hand private `[owner]`.
+3. ER: `init_permission` per account. Membership is fixed by the program: Table public, Deck private to nobody, each Hand private to its owner. Only the owning player can delegate their Hand or the Deck, and the Table only after both players are seated.
 4. ER: each player `commit_seed`.
 5. ER: `start_hand`, then `act` until the hand ends; repeat `start_hand` until `phase == Finished`.
 6. ER: `settle` (commit + undelegate). Base: `claim_pot`.
