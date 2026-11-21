@@ -39,6 +39,7 @@ export function Lobby({
   const creatorValue = joining ? joining.cardValues[0].toNumber() / 1e6 : 0;
   const creatorAllowance = joining ? joining.topUps[0].toNumber() / 1e6 : 0;
   const joinCost = (c: CardInfo) => {
+    if (joining && c.mint.equals(joining.cardMints[0])) return { pay: 0, ok: false };
     const v = price(c) ?? 0;
     if (v <= creatorValue) return { pay: creatorValue - v, ok: true };
     return { pay: 0, ok: v - creatorValue <= creatorAllowance };
