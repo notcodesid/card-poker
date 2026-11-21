@@ -67,8 +67,11 @@ export default function App() {
     const candidates = CARDS.filter((c) => !c.mint.equals(card.mint));
     const botCard =
       candidates.find((c) => (wallet.prices[c.mint.toBase58()] ?? 0) <= myPrice) ??
-      candidates.find((c) => (wallet.prices[c.mint.toBase58()] ?? 0) - myPrice <= allowance) ??
-      candidates[0];
+      candidates.find((c) => (wallet.prices[c.mint.toBase58()] ?? 0) - myPrice <= allowance);
+    if (!botCard) {
+      setError("No bot card fits that top-up allowance; raise it and try again.");
+      return;
+    }
     const id = randomTableId();
     await step("Funding the bot and giving it a starter card…", async () => {
       if ((await bot.solBalance()) < BOT_FUND_SOL * LAMPORTS_PER_SOL * 0.6) {
