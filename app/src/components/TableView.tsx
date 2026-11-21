@@ -177,7 +177,9 @@ export function TableView({
                     className="btn"
                     disabled={t.busy}
                     onClick={() => {
-                      const to = Math.min(Math.max(Number(raiseTo) || minRaise, minRaise), maxTo);
+                      const entered = Number(raiseTo) || 0;
+                      if (raiseTo && entered < Math.min(minRaise, maxTo)) return;
+                      const to = Math.min(entered || minRaise, maxTo);
                       t.act(`${owe === 0 ? "Bet" : "Raise"} to ${to}`, to === maxTo ? { allIn: {} } : { raise: { to: new BN(to) } });
                       setRaiseTo("");
                     }}
