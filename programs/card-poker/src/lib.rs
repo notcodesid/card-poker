@@ -34,8 +34,12 @@ pub const HAND_SEED: &[u8] = b"hand";
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const PRICE_SEED: &[u8] = b"price";
+/// Test USDC (6 decimals) the demo faucet tops each wallet up to.
+pub const FAUCET_USDC: u64 = 500_000_000;
 
 pub const NO_WINNER: u8 = u8::MAX;
+/// Seconds a player has to act before the opponent can fold them with `claim_timeout`.
+pub const TURN_TIMEOUT_SECS: i64 = 60;
 pub const SPLIT_POT: u8 = 2;
 
 #[ephemeral]
@@ -303,6 +307,7 @@ pub mod card_poker {
         table.put(dealer, sb);
         table.put(1 - dealer, bb);
         table.to_act = table.dealer;
+        table.turn_started_at = Clock::get()?.unix_timestamp;
         progress(table, deck, hand1, hand2)
     }
 
@@ -350,7 +355,25 @@ pub mod card_poker {
         }
         table.acted[seat] = true;
         table.to_act = opp as u8;
+        table.turn_started_at = Clock::get()?.unix_timestamp;
         progress(table, deck, hand1, hand2)
+    }
+
+    /// Private ER. If the player to act has stalled for `TURN_TIMEOUT_SECS`, their
+    /// opponent folds them.
+    pub fn claim_timeout(ctx: Context<TableAction>) -> Result<()> {
+        let table = &mut ctx.accounts.table;
+        let seat = table.seat_of(&ctx.accounts.player.key())?;
+        require!(table.phase.is_betting(), PokerError::WrongPhase);
+        require!(table.to_act as usize != seat, PokerError::NotTimedOut);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now >= table.turn_started_at + TURN_TIMEOUT_SECS,
+            PokerError::NotTimedOut
+        );
+        table.collect_bets();
+        table.award(seat as u8);
+        end_hand(table)
     }
 
     /// Private ER. Once the match is decided, commits all game accounts back to
@@ -443,10 +466,15 @@ pub mod card_poker {
     }
 
     /// Base layer. One-time setup of the card price table admin and the stablecoin mint.
-    pub fn init_config(ctx: Context<InitConfig>, usdc_mint: Pubkey) -> Result<()> {
+    pub fn init_config(
+        ctx: Context<InitConfig>,
+        usdc_mint: Pubkey,
+        faucet_enabled: bool,
+    ) -> Result<()> {
         let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.admin.key();
         config.usdc_mint = usdc_mint;
+        config.faucet_enabled = faucet_enabled;
         Ok(())
     }
 
@@ -479,6 +507,38 @@ pub mod card_poker {
             a.card_price.price,
             Some(seeds),
         )
+    }
+
+    /// Base layer, demo deployments only. Gives the caller one copy of a listed card
+    /// (if they hold none) and tops their test USDC up to `FAUCET_USDC`. Both mints
+    /// must have the config PDA as mint authority.
+    pub fn claim_starter_pack(ctx: Context<ClaimStarterPack>) -> Result<()> {
+        let a = &ctx.accounts;
+        require!(a.config.faucet_enabled, PokerError::FaucetDisabled);
+        require!(a.card_price.price > 0, PokerError::CardNotListed);
+        let seeds: &[&[&[u8]]] = &[&[CONFIG_SEED, &[ctx.bumps.config]]];
+        if a.user_card.amount == 0 {
+            mint_from_config(
+                &a.token_program,
+                &a.card_mint,
+                &a.user_card,
+                &a.config,
+                1,
+                seeds,
+            )?;
+        }
+        if a.user_usdc.amount < FAUCET_USDC {
+            let amount = FAUCET_USDC - a.user_usdc.amount;
+            mint_from_config(
+                &a.token_program,
+                &a.usdc_mint,
+                &a.user_usdc,
+                &a.config,
+                amount,
+                seeds,
+            )?;
+        }
+        Ok(())
     }
 
     /// Base layer. Delegates a table PDA to the (TEE) ER validator.
@@ -702,6 +762,25 @@ fn close_vault_token_account<'info>(
             },
         )
         .with_signer(signer_seeds),
+    )
+}
+
+fn mint_from_config<'info>(
+    token_program: &Program<'info, Token>,
+    mint: &Account<'info, Mint>,
+    to: &Account<'info, TokenAccount>,
+    config: &Account<'info, Config>,
+    amount: u64,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    let accounts = token::MintTo {
+        mint: mint.to_account_info(),
+        to: to.to_account_info(),
+        authority: config.to_account_info(),
+    };
+    token::mint_to(
+        CpiContext::new(token_program.key(), accounts).with_signer(signer_seeds),
+        amount,
     )
 }
 
@@ -932,6 +1011,27 @@ pub struct SetCardPrice<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ClaimStarterPack<'info> {
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(mut, mint::authority = config)]
+    pub card_mint: Box<Account<'info, Mint>>,
+    #[account(seeds = [PRICE_SEED, card_mint.key().as_ref()], bump)]
+    pub card_price: Box<Account<'info, CardPrice>>,
+    #[account(init_if_needed, payer = user, associated_token::mint = card_mint, associated_token::authority = user)]
+    pub user_card: Box<Account<'info, TokenAccount>>,
+    #[account(mut, address = config.usdc_mint, mint::authority = config)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(init_if_needed, payer = user, associated_token::mint = usdc_mint, associated_token::authority = user)]
+    pub user_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct SellCard<'info> {
     #[account(seeds = [CONFIG_SEED], bump)]
     pub config: Box<Account<'info, Config>>,
@@ -960,6 +1060,8 @@ pub struct SellCard<'info> {
 pub struct Config {
     pub admin: Pubkey,
     pub usdc_mint: Pubkey,
+    /// Lets anyone mint starter cards and test USDC (devnet demo only).
+    pub faucet_enabled: bool,
 }
 
 /// USDC value (base units) of one card of `mint`.
@@ -1031,6 +1133,8 @@ pub struct Table {
     pub last_hand_winner: u8,
     pub match_winner: u8,
     pub paid: bool,
+    /// When the current player's turn began (ER clock).
+    pub turn_started_at: i64,
     /// Escrowed trading cards, by seat.
     pub card_mints: [Pubkey; 2],
     /// USDC value of each card at the time it was staked.
@@ -1228,6 +1332,10 @@ pub enum PokerError {
     TopUpAllowanceTooLow,
     #[msg("This card has no sell-back price.")]
     CardNotListed,
+    #[msg("The demo faucet is disabled.")]
+    FaucetDisabled,
+    #[msg("The opponent's turn has not timed out.")]
+    NotTimedOut,
     #[msg("Arithmetic overflow.")]
     MathOverflow,
 }
