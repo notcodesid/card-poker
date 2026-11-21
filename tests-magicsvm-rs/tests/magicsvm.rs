@@ -4,9 +4,13 @@ use {
     anchor_lang::{
         prelude::Pubkey, system_program, AccountDeserialize, Id, InstructionData, ToAccountMetas,
     },
+    anchor_spl::{
+        associated_token::{get_associated_token_address, spl_associated_token_account},
+        token::spl_token,
+    },
     card_poker::{
-        accounts, instruction, AccountType, Action, Deck, Hand, Phase, Table, DECK_SEED, HAND_SEED,
-        TABLE_SEED, VAULT_SEED,
+        accounts, instruction, AccountType, Action, Deck, Hand, Phase, Table, CONFIG_SEED,
+        DECK_SEED, HAND_SEED, PRICE_SEED, TABLE_SEED, VAULT_SEED,
     },
     ephemeral_rollups_sdk::{
         access_control::structs::EphemeralPermission,
@@ -19,7 +23,8 @@ use {
         },
     },
     magicsvm::{MagicSVM, TransactionTarget},
-    solana_instruction::Instruction,
+    solana_address::Address,
+    solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_native_token::LAMPORTS_PER_SOL,
     solana_signer::Signer,
@@ -30,6 +35,13 @@ use {
 const STAKE: u64 = LAMPORTS_PER_SOL / 10;
 const STACK: u64 = 100;
 const SMALL_BLIND: u64 = 1;
+
+const USDC: u64 = 1_000_000;
+const CARD1_PRICE: u64 = 50 * USDC;
+const CARD2_PRICE: u64 = 80 * USDC;
+const MAX_TOP_UP: u64 = 40 * USDC;
+const START_USDC: u64 = 1_000 * USDC;
+const TREASURY_USDC: u64 = 10_000 * USDC;
 
 const BASE: TransactionTarget = TransactionTarget::Base;
 const ER: TransactionTarget = TransactionTarget::Ephemeral;
@@ -46,8 +58,56 @@ fn pda(seeds: &[&[u8]]) -> Pubkey {
     Pubkey::find_program_address(seeds, &card_poker::ID).0
 }
 
+/// Converts an instruction built by another solana-instruction version.
+fn conv(program_id: [u8; 32], metas: Vec<(Pubkey, bool, bool)>, data: Vec<u8>) -> Instruction {
+    Instruction {
+        program_id: Address::new_from_array(program_id),
+        accounts: metas
+            .into_iter()
+            .map(|(k, is_signer, is_writable)| AccountMeta {
+                pubkey: as_address(k),
+                is_signer,
+                is_writable,
+            })
+            .collect(),
+        data,
+    }
+}
+
+macro_rules! foreign {
+    ($ix:expr) => {{
+        let i = $ix;
+        conv(
+            i.program_id.to_bytes(),
+            i.accounts
+                .iter()
+                .map(|m| {
+                    (
+                        Pubkey::new_from_array(m.pubkey.to_bytes()),
+                        m.is_signer,
+                        m.is_writable,
+                    )
+                })
+                .collect(),
+            i.data,
+        )
+    }};
+}
+
+fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    get_associated_token_address(owner, mint)
+}
+
+struct Tokens {
+    config: Pubkey,
+    usdc: Pubkey,
+    cards: [Pubkey; 2],
+}
+
 struct Match {
     svm: MagicSVM,
+    admin: Keypair,
+    tok: Tokens,
     p1: Keypair,
     p2: Keypair,
     id: u64,
@@ -68,6 +128,17 @@ impl Match {
     ) {
         let kp = if signer == 0 { &self.p1 } else { &self.p2 };
         send_ixs(&mut self.svm, target, &[kp], &ixs, label);
+    }
+
+    fn send_kps(&mut self, signers: &[&Keypair], ixs: Vec<Instruction>, label: &str) {
+        send_ixs(&mut self.svm, BASE, signers, &ixs, label);
+    }
+
+    fn token_balance(&self, account: &Pubkey) -> u64 {
+        self.svm
+            .get_account_for(BASE, &as_address(*account))
+            .map(|a| u64::from_le_bytes(a.data[64..72].try_into().unwrap()))
+            .unwrap_or(0)
     }
 
     fn try_send(&mut self, signer: usize, ixs: Vec<Instruction>) -> bool {
@@ -183,14 +254,101 @@ impl Match {
     }
 }
 
+/// Creates USDC and two single-copy card mints, lists both cards, funds the
+/// sell-back treasury and gives each player one card and some USDC.
+fn setup_tokens(m: &mut Match) {
+    let admin = m.admin.insecure_clone();
+    let ka = as_pubkey(&admin.pubkey());
+    let mints = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let rent = 1_461_600; // rent-exempt minimum for an 82-byte mint
+    for (i, mint) in mints.iter().enumerate() {
+        let km = as_pubkey(&mint.pubkey());
+        let ixs = vec![
+            foreign!(solana_system_interface::instruction::create_account(
+                &ka.to_bytes().into(),
+                &km.to_bytes().into(),
+                rent,
+                82,
+                &spl_token::ID.to_bytes().into(),
+            )),
+            foreign!(spl_token::instruction::initialize_mint2(
+                &spl_token::ID,
+                &km,
+                &ka,
+                None,
+                if i == 0 { 6 } else { 0 },
+            )
+            .unwrap()),
+        ];
+        m.send_kps(&[&admin, mint], ixs, "create mint");
+    }
+    let usdc = as_pubkey(&mints[0].pubkey());
+    let cards = [as_pubkey(&mints[1].pubkey()), as_pubkey(&mints[2].pubkey())];
+    m.tok.usdc = usdc;
+    m.tok.cards = cards;
+
+    let config = m.tok.config;
+    let mut ixs = vec![ix(
+        instruction::InitConfig { usdc_mint: usdc },
+        accounts::InitConfig {
+            config,
+            admin: ka,
+            system_program: system_program::ID,
+        },
+    )];
+    for (card, price) in cards.iter().zip([CARD1_PRICE, CARD2_PRICE]) {
+        ixs.push(ix(
+            instruction::SetCardPrice { price },
+            accounts::SetCardPrice {
+                config,
+                card_mint: *card,
+                card_price: pda(&[PRICE_SEED, card.as_ref()]),
+                admin: ka,
+                system_program: system_program::ID,
+            },
+        ));
+    }
+    m.send_kps(&[&admin], ixs, "config + prices");
+
+    let fund = |owner: Pubkey, mint: Pubkey, amount: u64, m: &mut Match| {
+        let ixs = vec![
+            foreign!(
+                spl_associated_token_account::instruction::create_associated_token_account(
+                    &ka,
+                    &owner,
+                    &mint,
+                    &spl_token::ID,
+                )
+            ),
+            foreign!(spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &mint,
+                &ata(&owner, &mint),
+                &ka,
+                &[],
+                amount,
+            )
+            .unwrap()),
+        ];
+        m.send_kps(&[&admin], ixs, "fund");
+    };
+    let (k1, k2) = (m.key(0), m.key(1));
+    fund(config, usdc, TREASURY_USDC, m);
+    fund(k1, usdc, START_USDC, m);
+    fund(k2, usdc, START_USDC, m);
+    fund(k1, cards[0], 1, m);
+    fund(k2, cards[1], 1, m);
+}
+
 /// Creates a table, joins it, delegates everything to the ER and sets permissions.
 fn setup(id: u64) -> Match {
     let mut svm = MagicSVM::new();
     svm.add_program_from_file(as_address(card_poker::ID), program_so())
         .expect("load program");
-    let (p1, p2) = (Keypair::new(), Keypair::new());
+    let (p1, p2, admin) = (Keypair::new(), Keypair::new(), Keypair::new());
     svm.airdrop(&p1.pubkey(), 2 * LAMPORTS_PER_SOL).unwrap();
     svm.airdrop(&p2.pubkey(), 2 * LAMPORTS_PER_SOL).unwrap();
+    svm.airdrop(&admin.pubkey(), 2 * LAMPORTS_PER_SOL).unwrap();
     let idb = id.to_le_bytes();
     let k1 = as_pubkey(&p1.pubkey());
     let k2 = as_pubkey(&p2.pubkey());
@@ -201,10 +359,18 @@ fn setup(id: u64) -> Match {
         hand2: pda(&[HAND_SEED, &idb, k2.as_ref()]),
         vault: pda(&[VAULT_SEED, &idb]),
         svm,
+        tok: Tokens {
+            config: pda(&[CONFIG_SEED]),
+            usdc: Pubkey::default(),
+            cards: [Pubkey::default(); 2],
+        },
+        admin,
         p1,
         p2,
         id,
     };
+    setup_tokens(&mut m);
+    let (usdc, card1, card2) = (m.tok.usdc, m.tok.cards[0], m.tok.cards[1]);
 
     let create = ix(
         instruction::CreateTable {
@@ -212,6 +378,7 @@ fn setup(id: u64) -> Match {
             stake: STAKE,
             starting_stack: STACK,
             small_blind: SMALL_BLIND,
+            max_top_up: MAX_TOP_UP,
         },
         accounts::CreateTable {
             table: m.table,
@@ -219,6 +386,16 @@ fn setup(id: u64) -> Match {
             hand: m.hand1,
             vault: m.vault,
             player1: k1,
+            config: m.tok.config,
+            card_mint: card1,
+            card_price: pda(&[PRICE_SEED, card1.as_ref()]),
+            player_card: ata(&k1, &card1),
+            vault_card: ata(&m.vault, &card1),
+            usdc_mint: usdc,
+            player_usdc: ata(&k1, &usdc),
+            vault_usdc: ata(&m.vault, &usdc),
+            token_program: spl_token::ID,
+            associated_token_program: spl_associated_token_account::program::ID,
             system_program: system_program::ID,
         },
     );
@@ -250,6 +427,17 @@ fn setup(id: u64) -> Match {
             hand: m.hand2,
             vault: m.vault,
             player2: k2,
+            config: m.tok.config,
+            card_mint: card2,
+            card_price: pda(&[PRICE_SEED, card2.as_ref()]),
+            player_card: ata(&k2, &card2),
+            vault_card: ata(&m.vault, &card2),
+            usdc_mint: usdc,
+            player_usdc: ata(&k2, &usdc),
+            vault_usdc: ata(&m.vault, &usdc),
+            token_program: spl_token::ID,
+            associated_token_program: spl_associated_token_account::program::ID,
+            creator_usdc: ata(&k1, &usdc),
             system_program: system_program::ID,
         },
     );
@@ -267,6 +455,17 @@ fn setup(id: u64) -> Match {
     ];
     m.send(BASE, 1, ixs, "join table");
     assert_eq!(m.svm.get_balance(&as_address(m.vault)).unwrap(), 2 * STAKE);
+
+    // Card 2 is worth 30 USDC more: the creator's 40 USDC allowance covers the gap and 10 is refunded.
+    let gap = CARD2_PRICE - CARD1_PRICE;
+    assert_eq!(m.token_balance(&ata(&m.vault, &card1)), 1);
+    assert_eq!(m.token_balance(&ata(&m.vault, &card2)), 1);
+    assert_eq!(m.token_balance(&ata(&m.vault, &usdc)), gap);
+    assert_eq!(m.token_balance(&ata(&k1, &usdc)), START_USDC - gap);
+    assert_eq!(m.token_balance(&ata(&k2, &usdc)), START_USDC);
+    let t: Table = m.read(BASE, None, &m.table.clone()).unwrap();
+    assert_eq!(t.top_ups, [gap, 0]);
+    assert_eq!(t.card_values, [CARD1_PRICE, CARD2_PRICE]);
 
     let ixs = vec![
         m.permission_ix(m.table, k1, AccountType::Table { table_id: id }),
@@ -351,14 +550,71 @@ fn settle_and_claim(m: &mut Match) {
             table: m.table,
             vault: m.vault,
             winner,
+            payer: m.key(1 - t.match_winner as usize),
+            config: m.tok.config,
+            card_mint1: m.tok.cards[0],
+            card_mint2: m.tok.cards[1],
+            usdc_mint: m.tok.usdc,
+            vault_card1: ata(&m.vault, &m.tok.cards[0]),
+            vault_card2: ata(&m.vault, &m.tok.cards[1]),
+            vault_usdc: ata(&m.vault, &m.tok.usdc),
+            winner_card1: ata(&winner, &m.tok.cards[0]),
+            winner_card2: ata(&winner, &m.tok.cards[1]),
+            winner_usdc: ata(&winner, &m.tok.usdc),
+            token_program: spl_token::ID,
+            associated_token_program: spl_associated_token_account::program::ID,
             system_program: system_program::ID,
         },
     );
+    let usdc_before = m.token_balance(&ata(&winner, &m.tok.usdc));
     // The loser triggers the payout so the winner's balance delta excludes fees.
     m.send(BASE, 1 - t.match_winner as usize, vec![claim], "claim pot");
     let after = m.svm.get_balance(&as_address(winner)).unwrap();
     assert_eq!(after - before, 2 * STAKE, "winner receives both stakes");
     assert_eq!(m.svm.get_balance(&as_address(m.vault)).unwrap_or(0), 0);
+    let (usdc, cards) = (m.tok.usdc, m.tok.cards);
+    assert_eq!(
+        m.token_balance(&ata(&winner, &cards[0])),
+        1,
+        "winner gets card 1"
+    );
+    assert_eq!(
+        m.token_balance(&ata(&winner, &cards[1])),
+        1,
+        "winner gets card 2"
+    );
+    let gap = CARD2_PRICE - CARD1_PRICE;
+    assert_eq!(
+        m.token_balance(&ata(&winner, &usdc)) - usdc_before,
+        gap,
+        "winner gets the top-up"
+    );
+    assert_eq!(m.token_balance(&ata(&m.vault, &usdc)), 0);
+
+    // Instant sell-back of the more valuable card.
+    let config = m.tok.config;
+    let sell = ix(
+        instruction::SellCard {},
+        accounts::SellCard {
+            config,
+            card_mint: cards[1],
+            card_price: pda(&[PRICE_SEED, cards[1].as_ref()]),
+            seller_card: ata(&winner, &cards[1]),
+            treasury_card: ata(&config, &cards[1]),
+            usdc_mint: usdc,
+            treasury_usdc: ata(&config, &usdc),
+            seller_usdc: ata(&winner, &usdc),
+            seller: winner,
+            token_program: spl_token::ID,
+            associated_token_program: spl_associated_token_account::program::ID,
+            system_program: system_program::ID,
+        },
+    );
+    let before = m.token_balance(&ata(&winner, &usdc));
+    m.send(BASE, t.match_winner as usize, vec![sell], "sell card");
+    assert_eq!(m.token_balance(&ata(&winner, &usdc)) - before, CARD2_PRICE);
+    assert_eq!(m.token_balance(&ata(&winner, &cards[1])), 0);
+    assert_eq!(m.token_balance(&ata(&config, &cards[1])), 1);
 }
 
 #[test]
