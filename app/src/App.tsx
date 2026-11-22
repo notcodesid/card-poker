@@ -115,7 +115,8 @@ export default function App() {
     <div className="page">
       <header className="top">
         <div className="brand" onClick={() => go(null)}>
-          <span className="brand-name"><span className="spade">♠</span>Card Poker</span>
+          <span className="logo-chip" />
+          <span className="brand-name">CARD <span className="red">POKER</span></span>
           <span className="brand-sub">on MagicBlock</span>
         </div>
         <div className="wallet">

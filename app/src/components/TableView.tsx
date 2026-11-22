@@ -124,6 +124,7 @@ export function TableView({
             bet={bet(opp)}
             active={isBetting(phase) && table.toAct === opp}
             dealer={table.dealer === opp}
+            bubble={isBetting(phase) && table.toAct === opp ? "Thinking…" : undefined}
           >
             {oppCards.map((c, i) => (
               <PlayingCard key={i} card={c} hidden={c === NO_CARD} />
@@ -131,7 +132,13 @@ export function TableView({
           </Seat>
 
           <div className="board">
-            <div className="pot">Pot {table.pot.toNumber() + bet(0) + bet(1)}</div>
+            <div className="pot">
+              <ChipStack big />
+              <div>
+                <span className="pot-label">POT</span>
+                <span className="pot-amount">{table.pot.toNumber() + bet(0) + bet(1)}</span>
+              </div>
+            </div>
             <div className="board-cards">
               {[0, 1, 2, 3, 4].map((i) => (
                 <PlayingCard key={i} card={i < table.boardLen ? board[i] : undefined} />
@@ -152,11 +159,13 @@ export function TableView({
             bet={bet(mySeat)}
             active={myTurn}
             dealer={table.dealer === mySeat}
+            me
+            bubble={myTurn ? "Your turn" : undefined}
+            note={myHandName ? <div className="hand-name">{myHandName}</div> : undefined}
           >
             {myCards.map((c, i) => (
               <PlayingCard key={i} card={c} highlight />
             ))}
-            {myHandName && <div className="hand-name">{myHandName}</div>}
           </Seat>
 
           {myTurn && (
@@ -254,12 +263,26 @@ export function TableView({
   );
 }
 
+function ChipStack({ big }: { big?: boolean }) {
+  return (
+    <span className={`chip-stack${big ? " big" : ""}`}>
+      <i />
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
 function Seat({
   label,
   stack,
   bet,
   active,
   dealer,
+  me,
+  bubble,
+  note,
   children,
 }: {
   label: string;
@@ -267,16 +290,27 @@ function Seat({
   bet: number;
   active: boolean;
   dealer: boolean;
+  me?: boolean;
+  bubble?: string;
+  note?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <div className={`seat${active ? " active" : ""}`}>
-      <div className="seat-info">
-        <b>{label}</b> {dealer && <span className="dealer">D</span>}
-        <span className="chips">{stack} chips</span>
-        {bet > 0 && <span className="bet">bet {bet}</span>}
-      </div>
+    <div className={`seat${active ? " active" : ""}${me ? " me" : ""}`}>
+      {bubble && <div className="bubble">{bubble}</div>}
       <div className="seat-cards">{children}</div>
+      <div className="plate">
+        <div className="plate-stack">{stack} chips</div>
+        <div className="plate-name">{label}</div>
+        {dealer && <span className="dealer">D</span>}
+        {bet > 0 && (
+          <div className="bet">
+            <ChipStack />
+            {bet}
+          </div>
+        )}
+      </div>
+      {note}
     </div>
   );
 }
