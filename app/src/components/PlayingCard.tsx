@@ -21,8 +21,11 @@ export function PlayingCard({
   }
   return (
     <div className={`${cls} face ${isRed(card) ? "red" : "black"}`}>
-      <span className="rank">{rankLabel(card)}</span>
-      <span className="suit">{suitLabel(card)}</span>
+      <span className="corner">
+        <span className="rank">{rankLabel(card)}</span>
+        <span className="suit">{suitLabel(card)}</span>
+      </span>
+      <span className="pip">{suitLabel(card)}</span>
     </div>
   );
 }

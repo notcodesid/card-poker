@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { BN } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 import { PlayingCard } from "./PlayingCard";
@@ -72,25 +72,32 @@ export function TableView({
     <div className="table-page">
       <div className="table-head">
         <button className="btn ghost" onClick={onLeave}>← Lobby</button>
-        <div>
-          <b>Table #{table.tableId.toString()}</b> · {PHASE_LABEL[phase]}
-          {table.handNo > 0 && ` · hand ${table.handNo}`}
+        <div className="table-title">
+          <b>Table #{table.tableId.toString()}</b>
+          <span>
+            {PHASE_LABEL[phase]}
+            {table.handNo > 0 && ` · hand ${table.handNo}`}
+          </span>
         </div>
         <span className={`layer ${t.delegated ? "er" : "base"}`}>
           {t.delegated ? "Private Ephemeral Rollup (TEE)" : "Solana devnet"}
         </span>
       </div>
 
+      <div className="main-col">
       <div className="stakes">
         {[0, 1].map((i) => {
           const mint = table.cardMints[i];
           const info = cardByMint(mint);
           return (
-            <div key={i} className="stake">
+            <Fragment key={i}>
+            {i === 1 && <div className="vs">vs</div>}
+            <div className="stake">
               <div className="stake-label">{name(i)} staked</div>
               {info ? <TradingCard card={info} price={usdc(table.cardValues[i])} /> : <div className="tcard empty">?</div>}
               {table.topUps[i].gtn(0) && <div className="topup">+ ${usdc(table.topUps[i])} USDC top-up</div>}
             </div>
+            </Fragment>
           );
         })}
       </div>
@@ -199,17 +206,31 @@ export function TableView({
         </div>
       )}
 
+      </div>
+
       <div className="side">
         <div className="panel privacy">
-          <h3>What the private rollup lets you see</h3>
+          <h3>What the private rollup shows you</h3>
           <ul>
-            <li>✓ Your hole cards: readable with your TEE auth token</li>
             <li>
-              {t.opponentHidden === null ? "…" : t.opponentHidden ? "✕" : "!"} Opponent's hole cards:{" "}
-              {t.opponentHidden === null ? "checking" : t.opponentHidden ? "the TEE refused to return them" : "visible"}
+              <span className="mark ok">✓</span>
+              <span>Your hole cards: readable with your TEE auth token</span>
             </li>
-            <li>✕ Deck: private with no members, so nobody can read it</li>
-            <li>↥ At settlement, the deck and hands are wiped before the state is committed to Solana</li>
+            <li>
+              <span className="mark no">{t.opponentHidden === null ? "…" : t.opponentHidden ? "✕" : "!"}</span>
+              <span>
+                Opponent's hole cards:{" "}
+                {t.opponentHidden === null ? "checking…" : t.opponentHidden ? "the TEE refused to return them" : "visible"}
+              </span>
+            </li>
+            <li>
+              <span className="mark no">✕</span>
+              <span>Deck: private with no members, so nobody can read it</span>
+            </li>
+            <li>
+              <span className="mark">↥</span>
+              <span>At settlement, the deck and hands are wiped before the state is committed to Solana</span>
+            </li>
           </ul>
           <small>TEE: {TEE_ENDPOINT}</small>
         </div>
@@ -252,7 +273,7 @@ function Seat({
     <div className={`seat${active ? " active" : ""}`}>
       <div className="seat-info">
         <b>{label}</b> {dealer && <span className="dealer">D</span>}
-        <span>{stack} chips</span>
+        <span className="chips">{stack} chips</span>
         {bet > 0 && <span className="bet">bet {bet}</span>}
       </div>
       <div className="seat-cards">{children}</div>
