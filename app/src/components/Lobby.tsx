@@ -48,17 +48,48 @@ export function Lobby({
   return (
     <div className="lobby">
       <section className="hero">
-        <h1>Card Poker</h1>
-        <p>
-          Heads-up Texas Hold'em where the buy-in is a trading card from your collection. The winner walks
-          away with both. Hole cards are dealt inside a <b>MagicBlock Private Ephemeral Rollup</b>: they stay
-          encrypted in a TEE, so not even your opponent's node can read them.
-        </p>
+        <div>
+          <div className="eyebrow">Heads-up Hold'em · Solana devnet</div>
+          <h1>
+            Stake a card.
+            <br />
+            <em>Win both.</em>
+          </h1>
+          <p>
+            The buy-in is a trading card from your collection, value-matched with USDC. Hole cards are dealt
+            inside a <b>MagicBlock Private Ephemeral Rollup</b>, so nobody but you can read them, not even your
+            opponent's node.
+          </p>
+        </div>
+        <div className="features">
+          <div className="feature">
+            <div className="feature-icon">◈</div>
+            <div>
+              <b>Private hands</b>
+              <span>Shuffle and deal run in a TEE; each hand is readable only by its owner.</span>
+            </div>
+          </div>
+          <div className="feature">
+            <div className="feature-icon">⚡</div>
+            <div>
+              <b>Gasless, ~1 s actions</b>
+              <span>Every bet runs on the rollup, with no wallet popups.</span>
+            </div>
+          </div>
+          <div className="feature">
+            <div className="feature-icon">↥</div>
+            <div>
+              <b>Instant settlement</b>
+              <span>The winner gets both cards on Solana and can sell either at once.</span>
+            </div>
+          </div>
+        </div>
       </section>
 
       {needsSol && (
         <section className="panel warn">
-          <b>Fund your burner wallet with devnet SOL to play</b>
+          <h2>Fund your wallet to play</h2>
+          <p>This browser has its own devnet wallet. Send it a little devnet SOL (0.05 is plenty):</p>
           <code className="share">{wallet.client.publicKey.toBase58()}</code>
           <div className="row">
             <button className="btn" onClick={onAirdrop} disabled={!!busy}>Request airdrop</button>
@@ -80,7 +111,12 @@ export function Lobby({
       )}
 
       <section>
-        <h2>Your collection</h2>
+        <div className="section-head">
+          <h2>Your collection</h2>
+          <small>
+            {wallet.sol.toFixed(3)} SOL · ${wallet.usdc.toFixed(2)} test USDC
+          </small>
+        </div>
         <div className="grid">
           {CARDS.map((c) => {
             const n = owned(c);
@@ -91,6 +127,7 @@ export function Lobby({
                 card={c}
                 price={price(c)}
                 selected={selected?.mint.equals(c.mint)}
+                dimmed={n === 0}
                 onClick={n > 0 ? () => setSelected(c) : undefined}
                 footer={
                   n > 0 ? (
@@ -107,7 +144,7 @@ export function Lobby({
                         Sell ${price(c)}
                       </button>
                       {cost && (
-                        <span className={cost.ok ? "" : "bad"}>
+                        <span className={cost.ok ? "good" : "bad"}>
                           {cost.ok ? (cost.pay > 0 ? `+$${cost.pay} top-up` : "no top-up") : "too valuable"}
                         </span>
                       )}
@@ -129,7 +166,6 @@ export function Lobby({
             );
           })}
         </div>
-        <small>Balance: {wallet.sol.toFixed(3)} SOL · ${wallet.usdc.toFixed(2)} test USDC</small>
       </section>
 
       <section className="panel">
@@ -143,9 +179,11 @@ export function Lobby({
           </button>
         ) : (
           <>
-            <h2>Play</h2>
-            <label className="row">
-              Max top-up if the opponent's card is worth more: $
+            <div className="play-grid">
+            <div>
+            <h2>Start a match</h2>
+            <label className="field">
+              Max USDC top-up if the opponent's card is worth more
               <input
                 type="number"
                 className="raise-input"
@@ -160,16 +198,20 @@ export function Lobby({
                 disabled={!selected || !!busy || needsSol}
                 onClick={() => selected && onBot(selected, allowance)}
               >
-                {selected ? `Play vs bot with ${selected.name}` : "Select a card to stake"}
+                {selected ? `Play the bot with ${selected.name}` : "Select a card above"}
               </button>
               <button
                 className="btn"
                 disabled={!selected || !!busy || needsSol}
                 onClick={() => selected && onCreate(selected, allowance)}
               >
-                Create table and invite a friend
+                Invite a friend
               </button>
             </div>
+            </div>
+            <div>
+            <h2>Join a table</h2>
+            <p>Got a table ID from a friend? Open it to pick your stake.</p>
             <div className="row">
               <input
                 className="raise-input wide"
@@ -188,9 +230,11 @@ export function Lobby({
                 Open table
               </button>
             </div>
+            </div>
+            </div>
           </>
         )}
-        {busy && <div className="busy">… {busy}</div>}
+        {busy && <div className="busy">{busy}</div>}
       </section>
     </div>
   );

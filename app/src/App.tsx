@@ -114,9 +114,12 @@ export default function App() {
   return (
     <div className="page">
       <header className="top">
-        <div className="brand" onClick={() => go(null)}>♠ Card Poker</div>
+        <div className="brand" onClick={() => go(null)}>
+          <span className="brand-name"><span className="spade">♠</span>Card Poker</span>
+          <span className="brand-sub">on MagicBlock</span>
+        </div>
         <div className="wallet">
-          <span title={client.publicKey.toBase58()}>{shortKey(client.publicKey)}</span>
+          <span className="key" title={client.publicKey.toBase58()}>{shortKey(client.publicKey)}</span>
           <span>{wallet.sol.toFixed(3)} SOL</span>
           <span>${wallet.usdc.toFixed(0)} USDC</span>
         </div>
