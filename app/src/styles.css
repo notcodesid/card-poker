@@ -176,6 +176,7 @@ h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; letter-spacing: 1.2px;
 .pcard.back .lock { position: relative; z-index: 1; color: var(--gold); font-size: 18px; }
 .pcard.empty { border: 1px dashed rgba(245, 240, 228, 0.22); background: rgba(0, 0, 0, 0.12); }
 .pcard.glow.face { box-shadow: 0 0 0 2px rgba(212, 175, 106, 0.75), 0 8px 18px rgba(0, 0, 0, 0.4); }
+@media (max-width: 600px) { .board-cards { gap: 5px; } .pcard { width: 46px; height: 66px; border-radius: 6px; } .pcard .corner { top: 4px; left: 4px; } .pcard .corner .rank { font-size: 12px; } .pcard .corner .suit { font-size: 10px; } .pcard .pip { font-size: 24px; padding-top: 8px; } }
 
 /* side */
 .privacy ul { margin: 0; padding: 0; list-style: none; font-size: 13px; display: grid; gap: 10px; }
