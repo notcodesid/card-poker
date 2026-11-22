@@ -289,7 +289,7 @@ fn setup_tokens(m: &mut Match) {
 
     let config = m.tok.config;
     let mut ixs = vec![ix(
-        instruction::InitConfig { usdc_mint: usdc },
+        instruction::InitConfig { usdc_mint: usdc, faucet_enabled: false },
         accounts::InitConfig {
             config,
             admin: ka,
@@ -660,6 +660,11 @@ fn hole_cards_are_private_and_all_in_match_settles() {
         m.read::<Deck>(ER, Some(1), &deck).is_none(),
         "deck hidden from p2"
     );
+
+    // A fresh turn cannot be timed out.
+    let waiting = 1 - m.to_act();
+    let early = ix(instruction::ClaimTimeout {}, m.table_action(waiting));
+    assert!(!m.try_send(waiting, vec![early]), "timeout before deadline must fail");
 
     // Out-of-turn actions are rejected.
     let waiting = 1 - m.to_act();

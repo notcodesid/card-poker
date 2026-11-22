@@ -51,6 +51,34 @@ price is in USDC base units and is used for stake matching and sell-back.
 5. ER: `start_hand`, then `act` until the hand ends; repeat `start_hand` until `phase == Finished`.
 6. ER: `settle` (commit + undelegate). Base: `claim_pot`, then optionally `sell_card`.
 
+## Web app
+
+`app/` is a Vite + React client that talks to the program on Solana devnet and to MagicBlock's
+devnet TEE (`https://devnet-tee.magicblock.app`).
+
+- **No wallet extension needed:** each browser gets a burner keypair in localStorage. Fund it with
+  devnet SOL from the airdrop button or faucet.solana.com.
+- **Starter cards:** "Claim starter card" mints one demo card and test USDC from the program's
+  devnet-only faucet (`claim_starter_pack`).
+- **Two ways to play:**
+  - **Play vs bot:** the same browser runs a bot identity that stakes its own card and plays from
+    its own TEE session.
+  - **Invite a friend:** create a table, then share the `?table=<id>` link.
+- **Privacy panel:** the table view reads your hand with your TEE auth token. It also tries to read
+  the opponent's hand and shows that the TEE refuses.
+- **Latency:** the transaction log shows how long each rollup action took.
+
+```sh
+cd app
+yarn
+yarn dev              # http://localhost:5173
+yarn e2e-devnet       # full match on devnet + TEE with two scripted players
+yarn setup-devnet     # one-time: USDC/card mints, prices, treasury (admin = ~/.config/solana/id.json)
+```
+
+Devnet deployment: program `8inTx3PzfmU6iYqbTxikJ6PYWcrui9JzaWGuYRTu2zuP`. The mints are listed in
+`app/src/lib/deployment.json`.
+
 ## Build and test
 
 Requires Solana 3.1.9 and Rust stable.
@@ -72,5 +100,4 @@ commit/undelegate, and the escrow payout.
 ## Roadmap
 
 - Oracle or marketplace pricing instead of the admin price table.
-- Web app (wallet, TEE auth token, table UI).
 - Turn timeouts via MagicBlock cranks.
