@@ -1,6 +1,7 @@
 //! Heads-up Texas Hold'em on MagicBlock Private Ephemeral Rollups.
 //!
-//! Base layer: table creation, SOL stake escrow, payout.
+//! Base layer: trading-card escrow with USDC value matching, optional SOL stake,
+//! payout of both cards to the winner, and an instant sell-back treasury.
 //! Private ER: shuffle, private hole cards, betting, showdown.
 //!
 //! Accounts per table:
@@ -10,6 +11,8 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
+use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token::{self, Mint, Token, TokenAccount};
 use ephemeral_rollups_sdk::access_control::instructions::CreateEphemeralPermissionCpi;
 use ephemeral_rollups_sdk::access_control::structs::{
     EphemeralMembersArgs, EphemeralPermission, Member, AUTHORITY_FLAG, TX_LOGS_FLAG,
@@ -29,8 +32,14 @@ pub const TABLE_SEED: &[u8] = b"table";
 pub const DECK_SEED: &[u8] = b"deck";
 pub const HAND_SEED: &[u8] = b"hand";
 pub const VAULT_SEED: &[u8] = b"vault";
+pub const CONFIG_SEED: &[u8] = b"config";
+pub const PRICE_SEED: &[u8] = b"price";
+/// Test USDC (6 decimals) the demo faucet tops each wallet up to.
+pub const FAUCET_USDC: u64 = 500_000_000;
 
 pub const NO_WINNER: u8 = u8::MAX;
+/// Seconds a player has to act before the opponent can fold them with `claim_timeout`.
+pub const TURN_TIMEOUT_SECS: i64 = 60;
 pub const SPLIT_POT: u8 = 2;
 
 #[ephemeral]
@@ -45,6 +54,7 @@ pub mod card_poker {
         stake: u64,
         starting_stack: u64,
         small_blind: u64,
+        max_top_up: u64,
     ) -> Result<()> {
         require!(small_blind > 0, PokerError::InvalidConfig);
         require!(
@@ -79,7 +89,28 @@ pub mod card_poker {
             fund(sys, player, &ctx.accounts.vault.to_account_info(), stake)?;
         }
 
+        let a = &ctx.accounts;
+        token_transfer(
+            &a.token_program,
+            &a.player_card,
+            &a.vault_card,
+            player,
+            1,
+            None,
+        )?;
+        token_transfer(
+            &a.token_program,
+            &a.player_usdc,
+            &a.vault_usdc,
+            player,
+            max_top_up,
+            None,
+        )?;
+
         let table = &mut ctx.accounts.table;
+        table.card_mints[0] = ctx.accounts.card_mint.key();
+        table.card_values[0] = ctx.accounts.card_price.price;
+        table.top_ups[0] = max_top_up;
         table.table_id = table_id;
         table.player1 = player.key();
         table.player2 = Pubkey::default();
@@ -121,8 +152,53 @@ pub mod card_poker {
                 table.stake,
             )?;
         }
+        let a = &ctx.accounts;
+        require_keys_neq!(a.card_mint.key(), table.card_mints[0], PokerError::SameCard);
+        token_transfer(
+            &a.token_program,
+            &a.player_card,
+            &a.vault_card,
+            player,
+            1,
+            None,
+        )?;
+
+        // Value matching: the cheaper card's owner tops up the gap in USDC.
+        // The creator pre-escrowed `top_ups[0]` as an allowance; unused allowance is refunded now.
+        let creator_value = table.card_values[0];
+        let joiner_value = a.card_price.price;
+        let allowance = table.top_ups[0];
+        let (creator_top_up, joiner_top_up) = if joiner_value > creator_value {
+            let gap = joiner_value - creator_value;
+            require!(gap <= allowance, PokerError::TopUpAllowanceTooLow);
+            (gap, 0)
+        } else {
+            (0, creator_value - joiner_value)
+        };
+        token_transfer(
+            &a.token_program,
+            &a.player_usdc,
+            &a.vault_usdc,
+            player,
+            joiner_top_up,
+            None,
+        )?;
+        let id = table.table_id.to_le_bytes();
+        let seeds: &[&[&[u8]]] = &[&[VAULT_SEED, &id, &[ctx.bumps.vault]]];
+        token_transfer(
+            &a.token_program,
+            &a.vault_usdc,
+            &a.creator_usdc,
+            &a.vault,
+            allowance - creator_top_up,
+            Some(seeds),
+        )?;
+
         let table_id = table.table_id;
         let table = &mut ctx.accounts.table;
+        table.card_mints[1] = ctx.accounts.card_mint.key();
+        table.card_values[1] = joiner_value;
+        table.top_ups = [creator_top_up, joiner_top_up];
         table.player2 = player.key();
         table.phase = Phase::Ready;
         init_hand(&mut ctx.accounts.hand, table_id, player.key());
@@ -138,11 +214,32 @@ pub mod card_poker {
         table.paid = true;
         let id = table.table_id.to_le_bytes();
         let seeds: &[&[&[u8]]] = &[&[VAULT_SEED, &id, &[ctx.bumps.vault]]];
+        table.top_ups[0] = 0;
+        let a = &ctx.accounts;
+        token_transfer(
+            &a.token_program,
+            &a.vault_card,
+            &a.player_card,
+            &a.vault,
+            a.vault_card.amount,
+            Some(seeds),
+        )?;
+        token_transfer(
+            &a.token_program,
+            &a.vault_usdc,
+            &a.player_usdc,
+            &a.vault,
+            a.vault_usdc.amount,
+            Some(seeds),
+        )?;
+        let rent_to = a.player1.to_account_info();
+        close_vault_token_account(&a.token_program, &a.vault_card, &rent_to, &a.vault, seeds)?;
+        close_vault_token_account(&a.token_program, &a.vault_usdc, &rent_to, &a.vault, seeds)?;
         pay_from_vault(
-            &ctx.accounts.vault,
-            &ctx.accounts.player1.to_account_info(),
+            &a.vault,
+            &a.player1.to_account_info(),
             stake,
-            &ctx.accounts.system_program,
+            &a.system_program,
             seeds,
         )
     }
@@ -210,6 +307,7 @@ pub mod card_poker {
         table.put(dealer, sb);
         table.put(1 - dealer, bb);
         table.to_act = table.dealer;
+        table.turn_started_at = Clock::get()?.unix_timestamp;
         progress(table, deck, hand1, hand2)
     }
 
@@ -257,7 +355,25 @@ pub mod card_poker {
         }
         table.acted[seat] = true;
         table.to_act = opp as u8;
+        table.turn_started_at = Clock::get()?.unix_timestamp;
         progress(table, deck, hand1, hand2)
+    }
+
+    /// Private ER. If the player to act has stalled for `TURN_TIMEOUT_SECS`, their
+    /// opponent folds them.
+    pub fn claim_timeout(ctx: Context<TableAction>) -> Result<()> {
+        let table = &mut ctx.accounts.table;
+        let seat = table.seat_of(&ctx.accounts.player.key())?;
+        require!(table.phase.is_betting(), PokerError::WrongPhase);
+        require!(table.to_act as usize != seat, PokerError::NotTimedOut);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now >= table.turn_started_at + TURN_TIMEOUT_SECS,
+            PokerError::NotTimedOut
+        );
+        table.collect_bets();
+        table.award(seat as u8);
+        end_hand(table)
     }
 
     /// Private ER. Once the match is decided, commits all game accounts back to
@@ -311,13 +427,118 @@ pub mod card_poker {
         let amount = table.stake.checked_mul(2).ok_or(PokerError::MathOverflow)?;
         let id = table.table_id.to_le_bytes();
         let seeds: &[&[&[u8]]] = &[&[VAULT_SEED, &id, &[ctx.bumps.vault]]];
+        let a = &ctx.accounts;
+        token_transfer(
+            &a.token_program,
+            &a.vault_card1,
+            &a.winner_card1,
+            &a.vault,
+            a.vault_card1.amount,
+            Some(seeds),
+        )?;
+        token_transfer(
+            &a.token_program,
+            &a.vault_card2,
+            &a.winner_card2,
+            &a.vault,
+            a.vault_card2.amount,
+            Some(seeds),
+        )?;
+        token_transfer(
+            &a.token_program,
+            &a.vault_usdc,
+            &a.winner_usdc,
+            &a.vault,
+            a.vault_usdc.amount,
+            Some(seeds),
+        )?;
+        let rent_to = a.winner.to_account_info();
+        for account in [&a.vault_card1, &a.vault_card2, &a.vault_usdc] {
+            close_vault_token_account(&a.token_program, account, &rent_to, &a.vault, seeds)?;
+        }
         pay_from_vault(
-            &ctx.accounts.vault,
-            &ctx.accounts.winner.to_account_info(),
+            &a.vault,
+            &a.winner.to_account_info(),
             amount,
-            &ctx.accounts.system_program,
+            &a.system_program,
             seeds,
         )
+    }
+
+    /// Base layer. One-time setup of the card price table admin and the stablecoin mint.
+    pub fn init_config(
+        ctx: Context<InitConfig>,
+        usdc_mint: Pubkey,
+        faucet_enabled: bool,
+    ) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.admin = ctx.accounts.admin.key();
+        config.usdc_mint = usdc_mint;
+        config.faucet_enabled = faucet_enabled;
+        Ok(())
+    }
+
+    /// Base layer. Admin sets the USDC value of a card mint (used for stake matching and sell-back).
+    pub fn set_card_price(ctx: Context<SetCardPrice>, price: u64) -> Result<()> {
+        let card_price = &mut ctx.accounts.card_price;
+        card_price.mint = ctx.accounts.card_mint.key();
+        card_price.price = price;
+        Ok(())
+    }
+
+    /// Base layer. Instantly sells a card to the treasury at its listed price.
+    pub fn sell_card(ctx: Context<SellCard>) -> Result<()> {
+        let a = &ctx.accounts;
+        require!(a.card_price.price > 0, PokerError::CardNotListed);
+        token_transfer(
+            &a.token_program,
+            &a.seller_card,
+            &a.treasury_card,
+            &a.seller,
+            1,
+            None,
+        )?;
+        let seeds: &[&[&[u8]]] = &[&[CONFIG_SEED, &[ctx.bumps.config]]];
+        token_transfer(
+            &a.token_program,
+            &a.treasury_usdc,
+            &a.seller_usdc,
+            &a.config.to_account_info(),
+            a.card_price.price,
+            Some(seeds),
+        )
+    }
+
+    /// Base layer, demo deployments only. Gives the caller one copy of a listed card
+    /// (if they hold none) and tops their test USDC up to `FAUCET_USDC`. Both mints
+    /// must have the config PDA as mint authority.
+    pub fn claim_starter_pack(ctx: Context<ClaimStarterPack>) -> Result<()> {
+        let a = &ctx.accounts;
+        require!(a.config.faucet_enabled, PokerError::FaucetDisabled);
+        require!(a.card_price.price > 0, PokerError::CardNotListed);
+        let seeds: &[&[&[u8]]] = &[&[CONFIG_SEED, &[ctx.bumps.config]]];
+        if a.user_card.amount == 0 {
+            mint_from_config(
+                &a.token_program,
+                &a.card_mint,
+                &a.user_card,
+                &a.config,
+                1,
+                seeds,
+            )?;
+        }
+        if a.user_usdc.amount < FAUCET_USDC {
+            let amount = FAUCET_USDC - a.user_usdc.amount;
+            mint_from_config(
+                &a.token_program,
+                &a.usdc_mint,
+                &a.user_usdc,
+                &a.config,
+                amount,
+                seeds,
+            )?;
+        }
+        Ok(())
     }
 
     /// Base layer. Delegates a table PDA to the (TEE) ER validator.
@@ -497,6 +718,72 @@ fn init_hand(hand: &mut Hand, table_id: u64, player: Pubkey) {
     hand.cards = [NO_CARD; 2];
 }
 
+fn token_transfer<'info>(
+    token_program: &Program<'info, Token>,
+    from: &Account<'info, TokenAccount>,
+    to: &Account<'info, TokenAccount>,
+    authority: &impl ToAccountInfo<'info>,
+    amount: u64,
+    signer_seeds: Option<&[&[&[u8]]]>,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let accounts = token::Transfer {
+        from: from.to_account_info(),
+        to: to.to_account_info(),
+        authority: authority.to_account_info(),
+    };
+    let ctx = CpiContext::new(token_program.key(), accounts);
+    token::transfer(
+        match signer_seeds {
+            Some(seeds) => ctx.with_signer(seeds),
+            None => ctx,
+        },
+        amount,
+    )
+}
+
+/// Closes an emptied vault-owned token account, returning its rent to `destination`.
+fn close_vault_token_account<'info>(
+    token_program: &Program<'info, Token>,
+    account: &Account<'info, TokenAccount>,
+    destination: &AccountInfo<'info>,
+    vault: &SystemAccount<'info>,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    token::close_account(
+        CpiContext::new(
+            token_program.key(),
+            token::CloseAccount {
+                account: account.to_account_info(),
+                destination: destination.clone(),
+                authority: vault.to_account_info(),
+            },
+        )
+        .with_signer(signer_seeds),
+    )
+}
+
+fn mint_from_config<'info>(
+    token_program: &Program<'info, Token>,
+    mint: &Account<'info, Mint>,
+    to: &Account<'info, TokenAccount>,
+    config: &Account<'info, Config>,
+    amount: u64,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    let accounts = token::MintTo {
+        mint: mint.to_account_info(),
+        to: to.to_account_info(),
+        authority: config.to_account_info(),
+    };
+    token::mint_to(
+        CpiContext::new(token_program.key(), accounts).with_signer(signer_seeds),
+        amount,
+    )
+}
+
 fn permission_rent(members: usize) -> u64 {
     ephemeral_rollups_sdk::ephemeral_accounts::rent(EphemeralPermission::size_of(members) as u32)
 }
@@ -555,6 +842,23 @@ pub struct CreateTable<'info> {
     pub vault: SystemAccount<'info>,
     #[account(mut)]
     pub player1: Signer<'info>,
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    pub card_mint: Box<Account<'info, Mint>>,
+    #[account(seeds = [PRICE_SEED, card_mint.key().as_ref()], bump)]
+    pub card_price: Box<Account<'info, CardPrice>>,
+    #[account(mut, token::mint = card_mint, token::authority = player1)]
+    pub player_card: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = player1, associated_token::mint = card_mint, associated_token::authority = vault)]
+    pub vault_card: Box<Account<'info, TokenAccount>>,
+    #[account(address = config.usdc_mint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(mut, token::mint = usdc_mint, token::authority = player1)]
+    pub player_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = player1, associated_token::mint = usdc_mint, associated_token::authority = vault)]
+    pub vault_usdc: Box<Account<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
@@ -569,6 +873,26 @@ pub struct JoinTable<'info> {
     pub vault: SystemAccount<'info>,
     #[account(mut)]
     pub player2: Signer<'info>,
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    pub card_mint: Box<Account<'info, Mint>>,
+    #[account(seeds = [PRICE_SEED, card_mint.key().as_ref()], bump)]
+    pub card_price: Box<Account<'info, CardPrice>>,
+    #[account(mut, token::mint = card_mint, token::authority = player2)]
+    pub player_card: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = player2, associated_token::mint = card_mint, associated_token::authority = vault)]
+    pub vault_card: Box<Account<'info, TokenAccount>>,
+    #[account(address = config.usdc_mint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(mut, token::mint = usdc_mint, token::authority = player2)]
+    pub player_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = player2, associated_token::mint = usdc_mint, associated_token::authority = vault)]
+    pub vault_usdc: Box<Account<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    /// Receives the creator's unused top-up allowance.
+    #[account(mut, token::mint = usdc_mint, token::authority = table.player1)]
+    pub creator_usdc: Box<Account<'info, TokenAccount>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -580,6 +904,17 @@ pub struct CancelTable<'info> {
     pub vault: SystemAccount<'info>,
     #[account(mut)]
     pub player1: Signer<'info>,
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(mut, token::mint = table.card_mints[0], token::authority = player1)]
+    pub player_card: Box<Account<'info, TokenAccount>>,
+    #[account(mut, associated_token::mint = table.card_mints[0], associated_token::authority = vault)]
+    pub vault_card: Box<Account<'info, TokenAccount>>,
+    #[account(mut, token::mint = config.usdc_mint, token::authority = player1)]
+    pub player_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(mut, associated_token::mint = config.usdc_mint, associated_token::authority = vault)]
+    pub vault_usdc: Box<Account<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
@@ -627,7 +962,114 @@ pub struct ClaimPot<'info> {
     /// CHECK: checked against the table's recorded match winner.
     #[account(mut)]
     pub winner: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(address = table.card_mints[0])]
+    pub card_mint1: Box<Account<'info, Mint>>,
+    #[account(address = table.card_mints[1])]
+    pub card_mint2: Box<Account<'info, Mint>>,
+    #[account(address = config.usdc_mint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(mut, associated_token::mint = card_mint1, associated_token::authority = vault)]
+    pub vault_card1: Box<Account<'info, TokenAccount>>,
+    #[account(mut, associated_token::mint = card_mint2, associated_token::authority = vault)]
+    pub vault_card2: Box<Account<'info, TokenAccount>>,
+    #[account(mut, associated_token::mint = usdc_mint, associated_token::authority = vault)]
+    pub vault_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = payer, associated_token::mint = card_mint1, associated_token::authority = winner)]
+    pub winner_card1: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = payer, associated_token::mint = card_mint2, associated_token::authority = winner)]
+    pub winner_card2: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = payer, associated_token::mint = usdc_mint, associated_token::authority = winner)]
+    pub winner_usdc: Box<Account<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitConfig<'info> {
+    #[account(init, payer = admin, space = 8 + Config::INIT_SPACE, seeds = [CONFIG_SEED], bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetCardPrice<'info> {
+    #[account(seeds = [CONFIG_SEED], bump, has_one = admin)]
+    pub config: Account<'info, Config>,
+    pub card_mint: Account<'info, Mint>,
+    #[account(init_if_needed, payer = admin, space = 8 + CardPrice::INIT_SPACE, seeds = [PRICE_SEED, card_mint.key().as_ref()], bump)]
+    pub card_price: Account<'info, CardPrice>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimStarterPack<'info> {
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(mut, mint::authority = config)]
+    pub card_mint: Box<Account<'info, Mint>>,
+    #[account(seeds = [PRICE_SEED, card_mint.key().as_ref()], bump)]
+    pub card_price: Box<Account<'info, CardPrice>>,
+    #[account(init_if_needed, payer = user, associated_token::mint = card_mint, associated_token::authority = user)]
+    pub user_card: Box<Account<'info, TokenAccount>>,
+    #[account(mut, address = config.usdc_mint, mint::authority = config)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(init_if_needed, payer = user, associated_token::mint = usdc_mint, associated_token::authority = user)]
+    pub user_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SellCard<'info> {
+    #[account(seeds = [CONFIG_SEED], bump)]
+    pub config: Box<Account<'info, Config>>,
+    pub card_mint: Box<Account<'info, Mint>>,
+    #[account(seeds = [PRICE_SEED, card_mint.key().as_ref()], bump)]
+    pub card_price: Box<Account<'info, CardPrice>>,
+    #[account(mut, token::mint = card_mint, token::authority = seller)]
+    pub seller_card: Box<Account<'info, TokenAccount>>,
+    #[account(init_if_needed, payer = seller, associated_token::mint = card_mint, associated_token::authority = config)]
+    pub treasury_card: Box<Account<'info, TokenAccount>>,
+    #[account(address = config.usdc_mint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(mut, associated_token::mint = usdc_mint, associated_token::authority = config)]
+    pub treasury_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(mut, token::mint = usdc_mint, token::authority = seller)]
+    pub seller_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub seller: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct Config {
+    pub admin: Pubkey,
+    pub usdc_mint: Pubkey,
+    /// Lets anyone mint starter cards and test USDC (devnet demo only).
+    pub faucet_enabled: bool,
+}
+
+/// USDC value (base units) of one card of `mint`.
+#[account]
+#[derive(InitSpace)]
+pub struct CardPrice {
+    pub mint: Pubkey,
+    pub price: u64,
 }
 
 #[delegate]
@@ -691,6 +1133,14 @@ pub struct Table {
     pub last_hand_winner: u8,
     pub match_winner: u8,
     pub paid: bool,
+    /// When the current player's turn began (ER clock).
+    pub turn_started_at: i64,
+    /// Escrowed trading cards, by seat.
+    pub card_mints: [Pubkey; 2],
+    /// USDC value of each card at the time it was staked.
+    pub card_values: [u64; 2],
+    /// USDC each seat escrowed to match the other card's value.
+    pub top_ups: [u64; 2],
 }
 
 impl Table {
@@ -876,6 +1326,16 @@ pub enum PokerError {
     WrongAccount,
     #[msg("Stake must be 0 or at least the rent-exempt minimum.")]
     StakeBelowRent,
+    #[msg("Both players staked the same card mint.")]
+    SameCard,
+    #[msg("Creator's top-up allowance does not cover the card value gap.")]
+    TopUpAllowanceTooLow,
+    #[msg("This card has no sell-back price.")]
+    CardNotListed,
+    #[msg("The demo faucet is disabled.")]
+    FaucetDisabled,
+    #[msg("The opponent's turn has not timed out.")]
+    NotTimedOut,
     #[msg("Arithmetic overflow.")]
     MathOverflow,
 }
