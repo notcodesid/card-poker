@@ -1,0 +1,47 @@
+{
+  "usdcMint": "EtQPr3fvjx2pfQutjZGPcfJXdUQqWPG2bbaTNob7Yg7t",
+  "cards": [
+    {
+      "name": "Ember Drake",
+      "rarity": "Legendary",
+      "hue": 12,
+      "glyph": "✹",
+      "mint": "7MaTB431UC81Q62cELd3i97vECHGypcwFQ8r8xee2c7N"
+    },
+    {
+      "name": "Tidal Leviathan",
+      "rarity": "Epic",
+      "hue": 200,
+      "glyph": "≋",
+      "mint": "GoqPpG7njKHPtUUWVHgXoLgxGnfM1e7yCemGCBCz86oW"
+    },
+    {
+      "name": "Storm Owl",
+      "rarity": "Rare",
+      "hue": 265,
+      "glyph": "☾",
+      "mint": "6wu6RyTfSzeU1XSUhY3xpz7vYc2uDeyV3xHZgQXZZdWj"
+    },
+    {
+      "name": "Moss Golem",
+      "rarity": "Common",
+      "hue": 120,
+      "glyph": "◆",
+      "mint": "BpYv8yDgkVo6mjumPFM4HcY86GeE4bEhqS3WRqVDW5re"
+    },
+    {
+      "name": "Void Fox",
+      "rarity": "Epic",
+      "hue": 300,
+      "glyph": "✦",
+      "mint": "EuJsK36nJQKBmCAktUUUGtdeEyDngNSHTQH4prdBhmyp"
+    },
+    {
+      "name": "Solar Phoenix",
+      "rarity": "Legendary",
+      "hue": 42,
+      "glyph": "☀",
+      "mint": "HNSFochHZKsySqAJARVuV5Lw4LxxrQ2xhD1NwSHTfJnP"
+    }
+  ]
+}

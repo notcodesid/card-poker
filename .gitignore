@@ -1,0 +1,32 @@
+*.DS_Store
+.idea
+**/*.rs.bk
+**/target
+**/target/deploy/*-keypair.json
+**/node_modules
+**/test-ledger*
+**/.anchor
+**/.bolt
+**/.yarn
+**/.next/
+**/dist
+**/.env
+**/.vercel
+**/tsconfig.tsbuildinfo
+**/*test-storage
+
+# Bolt's predeployed program keypairs — kept in tree so anchor can deploy stable IDs.
+!/bolt-counter/target/deploy/counter-keypair.json
+!/bolt-counter/target/deploy/increase-keypair.json
+
+**/tests-kit
+
+# Logs
+**/**.log
+
+# Query Filtering Service local Range risk cache
+**/range-risk-cache.db
+
+# Shared CARGO_TARGET_DIR for the tests-magicsvm-rs suites (scripts/test-magicsvm.sh, CI)
+.magicsvm-rs-target/
+**/.anchor

@@ -1,0 +1,26 @@
+[package]
+name = "card-poker"
+version = "0.1.0"
+description = "Heads-up trading-card poker on MagicBlock Private Ephemeral Rollups"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "card_poker"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "anchor-spl/token_2022"]
+custom-heap = []
+custom-panic = []
+anchor-debug = []
+
+[dependencies]
+anchor-lang = { version = "1.0.2", features = ["init-if-needed"] }
+anchor-spl = { version = "=1.0.2", default-features = false, features = ["token", "associated_token"] }
+ephemeral-rollups-sdk = { version = "0.16.2", features = ["anchor", "access-control"] }
+solana-sha256-hasher = "3.1.0"
